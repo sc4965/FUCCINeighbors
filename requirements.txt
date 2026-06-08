@@ -1,0 +1,10 @@
+# Core (VME tagging, tracking, intensity, phase gating, plots)
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+scikit-learn>=1.2        # optional: GMM auto-gating ('--gate-method gmm')
+
+# Imaging I/O + segmentation (only needed to go from TIFFs -> masks)
+tifffile>=2023.1         # read channel-split TIFF stacks
+cellpose>=3.0            # nuclear segmentation (a CUDA GPU is recommended)

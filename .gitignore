@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# Outputs / data (don't commit large imaging data or generated results)
+*.tif
+*.tiff
+*.h5
+*.hdf5
+*.png
+*.csv
+*.parquet
+
+# Keep example/demo figures out of the repo by default; force-add if you want one:
+#   git add -f docs/example.png
