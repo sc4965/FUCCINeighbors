@@ -131,7 +131,8 @@ def classify_fucci4(
     truth_table: Optional[Mapping[tuple, str]] = None,
     detect_mitosis: bool = False,
     eccentricity_col: str = "eccentricity",
-    mitosis_quantile: float = 0.1,
+    mitosis_min_eccentricity: Optional[float] = 0.8,
+    mitosis_quantile: float = 0.9,
     phase_col: str = "phase",
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     """Assign a FUCCI-4 cell-cycle phase to every row.
@@ -153,9 +154,14 @@ def classify_fucci4(
     truth_table:
         Optional override of the (cdt1+, geminin+, slbp+) -> phase mapping.
     detect_mitosis:
-        If True, split a fraction of ``G2/M`` cells into ``M`` using a rounding
-        heuristic on ``eccentricity_col`` (mitotic nuclei round up). This is a
-        coarse proxy; refine with dedicated mitosis detection if needed.
+        If True, reclassify ``G2/M`` cells whose H1.0 chromatin is **condensed**
+        into ``M``. During mitosis the histone-marked chromatin forms an
+        elongated, rectangular metaphase plate -> high ``eccentricity_col``. A
+        cell in the Geminin-high (G2/M) window with eccentricity at or above
+        ``mitosis_min_eccentricity`` (absolute, default 0.8) is called ``M``. Pass
+        ``mitosis_min_eccentricity=None`` to instead use the ``mitosis_quantile``
+        of the G2/M eccentricity distribution. Works for either H1.0 fluorophore
+        (mNeonGreen or miRFP720), since both report chromatin morphology.
 
     Returns
     -------
@@ -207,14 +213,18 @@ def classify_fucci4(
     )
 
     if detect_mitosis and eccentricity_col in out.columns:
+        # Mitotic H1.0 chromatin condenses into an elongated/rectangular plate
+        # -> HIGH eccentricity. Only consider the Geminin-high (G2/M) window.
         g2m = phases == "G2/M"
         if g2m.any():
-            ecc = out.loc[g2m, eccentricity_col].to_numpy()
-            # mitotic nuclei round up -> low eccentricity
-            ecc_thr = np.nanquantile(ecc, mitosis_quantile)
-            mitotic = out[eccentricity_col].to_numpy() <= ecc_thr
-            phases[g2m & mitotic] = "M"
-            used["mitosis_eccentricity"] = float(ecc_thr)
+            ecc_all = out[eccentricity_col].to_numpy(dtype=float)
+            if mitosis_min_eccentricity is not None:
+                ecc_thr = float(mitosis_min_eccentricity)
+            else:
+                ecc_thr = float(np.nanquantile(ecc_all[g2m], mitosis_quantile))
+            mitotic = g2m & (ecc_all >= ecc_thr)
+            phases[mitotic] = "M"
+            used["mitosis_min_eccentricity"] = ecc_thr
 
     out[phase_col] = phases
     logger.info(
