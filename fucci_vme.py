@@ -136,6 +136,11 @@ class VMEConfig:
     phase_col: Optional[str] = None
     gfp_col: Optional[str] = None
     id_col: Optional[str] = None  # cell identity column; auto-built if None
+    # Precomputed boolean infection column. When set, infection is read directly
+    # from this column (per frame) instead of thresholding GFP intensity. This is
+    # how the morphology-based pipeline (cell-surface GFP / mNeonGreen-H1.0
+    # version) feeds its shape-based infection calls into the VME logic.
+    infection_col: Optional[str] = None
 
     # --- infection / VME logic ---
     gfp_threshold: float = 0.0
@@ -232,28 +237,39 @@ def find_index_infections(
     cfg: VMEConfig,
     id_col: str,
 ) -> pd.DataFrame:
-    """Find, per cell, the first frame whose GFP intensity exceeds the threshold.
+    """Find, per cell, the first frame it is infected.
+
+    Infection is read from ``cfg.infection_col`` (a precomputed boolean column,
+    e.g. from morphology-based detection) when provided; otherwise from the first
+    frame the GFP intensity exceeds ``cfg.gfp_threshold``.
 
     Returns a dataframe with columns ``[id_col, 'infection_frame', 'gfp_at_infection']``
     sorted by infection frame. Each row is an "Index Cell".
     """
     frame_col = _resolve_column(df, "frame", cfg.frame_col)
-    gfp_col = _resolve_column(df, "gfp", cfg.gfp_col)
     if frame_col is None:
         raise KeyError("Could not resolve a 'frame' column.")
-    if gfp_col is None:
-        raise KeyError(
-            "Could not resolve a GFP intensity column. Pass cfg.gfp_col explicitly "
-            f"(looked for {COLUMN_ALIASES['gfp']})."
-        )
 
-    infected = df[df[gfp_col] > cfg.gfp_threshold]
+    # Decide the infection criterion: precomputed boolean column vs GFP threshold.
+    if cfg.infection_col is not None:
+        if cfg.infection_col not in df.columns:
+            raise KeyError(f"infection_col {cfg.infection_col!r} not in dataframe.")
+        infected = df[df[cfg.infection_col].astype(bool)]
+        value_col = cfg.infection_col
+        criterion = f"column {cfg.infection_col!r} is True"
+    else:
+        gfp_col = _resolve_column(df, "gfp", cfg.gfp_col)
+        if gfp_col is None:
+            raise KeyError(
+                "Could not resolve a GFP intensity column. Pass cfg.gfp_col or "
+                f"cfg.infection_col explicitly (looked for {COLUMN_ALIASES['gfp']})."
+            )
+        infected = df[df[gfp_col] > cfg.gfp_threshold]
+        value_col = gfp_col
+        criterion = f"GFP > {cfg.gfp_threshold:.3g} in {gfp_col!r}"
+
     if infected.empty:
-        logger.warning(
-            "No cell exceeds the GFP threshold (%.3g) in column %r.",
-            cfg.gfp_threshold,
-            gfp_col,
-        )
+        logger.warning("No cell is infected (%s).", criterion)
         return pd.DataFrame(columns=[id_col, "infection_frame", "gfp_at_infection"])
 
     first_cross = (
@@ -261,8 +277,8 @@ def find_index_infections(
         .groupby(id_col, as_index=False)
         .first()
     )
-    out = first_cross[[id_col, frame_col, gfp_col]].rename(
-        columns={frame_col: "infection_frame", gfp_col: "gfp_at_infection"}
+    out = first_cross[[id_col, frame_col, value_col]].rename(
+        columns={frame_col: "infection_frame", value_col: "gfp_at_infection"}
     )
     out = out.sort_values("infection_frame").reset_index(drop=True)
     logger.info("Identified %d index (infected) cell(s).", len(out))
@@ -379,7 +395,7 @@ def tag_vme(
     frame_col = _resolve_column(df, "frame", cfg.frame_col)
     x_col = _resolve_column(df, "x", cfg.x_col)
     y_col = _resolve_column(df, "y", cfg.y_col)
-    gfp_col = _resolve_column(df, "gfp", cfg.gfp_col)
+    gfp_col = None if cfg.infection_col is not None else _resolve_column(df, "gfp", cfg.gfp_col)
     for role, col in (("frame", frame_col), ("x", x_col), ("y", y_col)):
         if col is None:
             raise KeyError(f"Could not resolve a {role!r} column.")
@@ -417,7 +433,9 @@ def tag_vme(
             continue
 
         # --- determine infected cells in this frame ---
-        if cfg.dynamic_infection and gfp_col is not None:
+        if cfg.infection_col is not None:
+            infected_mask = frame_df[cfg.infection_col].astype(bool)
+        elif cfg.dynamic_infection and gfp_col is not None:
             infected_mask = frame_df[gfp_col] > cfg.gfp_threshold
         else:
             # static: a cell is infected from its index infection frame onward
