@@ -51,6 +51,7 @@ def segment_stack(
     Integer label movie of shape ``(T, Y, X)`` (0 = background).
     """
     try:
+        import cellpose
         from cellpose import models
     except ImportError as exc:  # pragma: no cover - depends on optional dep
         raise ImportError(
@@ -64,26 +65,43 @@ def segment_stack(
     if stack.ndim != 3:
         raise ValueError(f"Expected (T, Y, X) or (Y, X); got {stack.shape}")
 
-    if pretrained_model is not None:
-        model = models.CellposeModel(gpu=gpu, pretrained_model=str(pretrained_model))
-        eval_kwargs = {}
+    # CellPose v4 ("Cellpose-SAM") removed the ``models.Cellpose`` class, the
+    # ``model_type`` argument, and the per-call ``channels`` argument. Detect the
+    # major version and build the model / eval kwargs accordingly so this works
+    # on both v4 and the older v2/v3 API.
+    try:
+        from importlib.metadata import version as _pkg_version
+
+        cp_major = int(_pkg_version("cellpose").split(".")[0])
+    except Exception:  # pragma: no cover - fall back to attribute probing
+        cp_major = 3 if hasattr(models, "Cellpose") else 4
+
+    base_eval = dict(flow_threshold=flow_threshold, cellprob_threshold=cellprob_threshold)
+
+    if cp_major >= 4:
+        # v4: single generalist model, grayscale input, no channels/model_type
+        if pretrained_model is not None:
+            model = models.CellposeModel(gpu=gpu, pretrained_model=str(pretrained_model))
+        else:
+            model = models.CellposeModel(gpu=gpu)
+        eval_kwargs = dict(base_eval)
+        if diameter is not None:
+            eval_kwargs["diameter"] = diameter
     else:
-        try:
+        # v2/v3: explicit nuclei model + channels=[0, 0] for a single grayscale plane
+        if pretrained_model is not None:
+            model = models.CellposeModel(gpu=gpu, pretrained_model=str(pretrained_model))
+        elif hasattr(models, "Cellpose"):
             model = models.Cellpose(gpu=gpu, model_type=model_type)
-        except TypeError:  # newer cellpose drops model_type on Cellpose
+        else:  # pragma: no cover - unusual builds
             model = models.CellposeModel(gpu=gpu, model_type=model_type)
-        eval_kwargs = {}
+        eval_kwargs = dict(base_eval, channels=[0, 0], diameter=diameter)
+
+    logger.info("Using cellpose v%s (major=%d)", getattr(cellpose, "version", "?"), cp_major)
 
     labels = np.zeros(stack.shape, dtype=np.int32)
     for t in range(stack.shape[0]):
-        result = model.eval(
-            stack[t].astype(np.float32),
-            diameter=diameter,
-            channels=[0, 0],
-            flow_threshold=flow_threshold,
-            cellprob_threshold=cellprob_threshold,
-            **eval_kwargs,
-        )
+        result = model.eval(stack[t].astype(np.float32), **eval_kwargs)
         masks = result[0]  # (masks, flows, styles[, diams])
         labels[t] = masks.astype(np.int32)
         logger.info("Segmented frame %d/%d: %d nuclei", t + 1, stack.shape[0], int(masks.max()))
